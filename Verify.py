@@ -1,24 +1,5 @@
 """
 SITM 攻击 ILLcipher-64 (10 轮, 64-bit 分组, 128-bit 密钥)
-
-攻击模型：
-  1. 外层遍历共享密钥空间（当前 chunk 内的 shared bits）。
-  2. 对每种 shared 猜测，遍历前向独有密钥 K_f，计算前向匹配点向量 u，构建列表 L_f。
-  3. 同时遍历后向独有密钥 K_b，计算后向匹配点向量 v，构建列表 L_b。
-  4. 通过即时匹配（Instant Matching）算法合并 L_f 与 L_b，得到候选 (K_f, K_b)。
-  5. 用多对明密文对候选进行 sbox_match 验证， survivor 即为恢复出的密钥。
-
-密钥划分（基于影响矩阵分析，bit 0 = MSB）：
-  FWD_UNK = {0,1,2,3,6,56,57,58,59,60,61,62,63}  → 前向未知比特，即后向独有 K_b，13 bits
-  BWD_UNK = {4,5,11,12,13,14}                     → 后向未知比特，即前向独有 K_f，6 bits
-
-向量 u（前向，SubCell 输入，共 6 bits）：
-  - S-box 5 (0-based idx=4): 输入 bits [2,3,4] → 3 bits
-  - S-box 6 (idx=5):          输入 bit  [3]    → 1 bit
-  - S-box 8 (idx=7):          输入 bits [2,3]  → 2 bits
-
-向量 v（后向，SubCell 输出，共 15 bits）：
-  - S-box 5/6/8 的全部 5 个输出 bits，各 5 bits。
 """
 
 import itertools
@@ -269,23 +250,6 @@ def sbox_match(fwd_state, bwd_state):
 def attack_chunk(chunk_idx, true_chunk_value, num_pairs=5, seed=0):
     """
     对单个 16-bit chunk 执行 Sieve-in-the-Middle 攻击。
-
-    流程（对应论文攻击模型）：
-      1. 将该 chunk 的 16 bits 按 {前向独有, 后向独有, 共享} 分割。
-      2. 外层枚举共享 bits。
-      3. 内层 A：遍历前向独有 bits，对每个猜测计算前向匹配点状态，
-         提取向量 u，构建字典 L_f（u → [(fwd_guess, f_state0), ...]）。
-      4. 内层 B：遍历后向独有 bits，对每个猜测计算后向匹配点状态，
-         提取向量 v，构建列表 L_b（[(v, bwd_guess, b_state0), ...]）。
-      5. 即时匹配（Instant Matching）合并 L_f 与 L_b，得到候选 (fwd, bwd)。
-      6. 用多对明密文对候选做 sbox_match 验证， survivors 即为恢复出的密钥。
-
-    优化：
-      - key_schedule 结果缓存，避免重复计算。
-      - L_f / L_b 构建时同时缓存第一对明密文的匹配点状态，
-        验证阶段对第一对直接复用，减少约 1/num_pairs 的计算量。
-      - 退化情况（只有前向/后向/共享一种类型）退化为直接枚举，
-        避免无意义的空 L_f / L_b 构建。
     """
     # ---- 1. 构建真值主密钥并生成明密文对 ----
     master_key_true = set_chunk(chunk_idx, true_chunk_value)

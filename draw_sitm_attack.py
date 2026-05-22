@@ -1,5 +1,5 @@
 """
-绘制 SITM 攻击 ILLcipher-64 扩散图（仿论文 Fig.6 PRESENT MITM 风格）
+绘制 SITM 攻击 ILLcipher-64 扩散图
 
 左侧：前向计算（P → 匹配点 SubCell 输入），从上往下
 右侧：后向计算（C → 匹配点 SubCell 输出），从下往上
