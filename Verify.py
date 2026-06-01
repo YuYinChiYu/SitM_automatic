@@ -173,18 +173,18 @@ INSTANT_MATCH_TABLES = _build_instant_match_tables()
 
 def instant_match(Lf, Lb):
     """
-    标准即时匹配算法（对应论文图 2）。
+    标准即时匹配算法
 
     参数:
-      Lf : dict，键 = u_tuple，值 = list of (fwd_guess, f_state0)
-      Lb : list of (v_tuple, bwd_guess, b_state0)
+      Lf : dict，键 = u_tuple，值 = list of fwd_guess
+      Lb : list of (v_tuple, bwd_guess)
 
     返回:
       candidates : set of (fwd_guess, bwd_guess)
     """
     T5, T6, T8 = INSTANT_MATCH_TABLES
     candidates = set()
-    for v_tuple, bwd_guess, _ in Lb:
+    for v_tuple, bwd_guess in Lb:
         v5, v6, v8 = v_tuple
         U5 = T5.get(v5, set())
         U6 = T6.get(v6, set())
@@ -196,58 +196,16 @@ def instant_match(Lf, Lb):
                 for u8 in U8:
                     u_tuple = (u5, u6, u8)
                     if u_tuple in Lf:
-                        for fwd_guess, _ in Lf[u_tuple]:
+                        for fwd_guess in Lf[u_tuple]:
                             candidates.add((fwd_guess, bwd_guess))
     return candidates
-
-
-# ---------------------------------------------------------------------------
-# S-box 匹配（用于多对明密文验证阶段）
-# ---------------------------------------------------------------------------
-
-def _build_feasible_table():
-    """构建 feasible[in_known] = set of out_known，用于 sbox_match 验证。"""
-    table = []
-    for sbox_idx, in_pos, out_pos in SBOX_INFO:
-        unk_in = [b for b in range(5) if b not in in_pos]
-        feasible = {}
-        for in_known in itertools.product((0, 1), repeat=len(in_pos)):
-            outs = set()
-            for free in itertools.product((0, 1), repeat=len(unk_in)):
-                full_in = [0] * 5
-                for idx, b in enumerate(in_pos):
-                    full_in[b] = in_known[idx]
-                for idx, b in enumerate(unk_in):
-                    full_in[b] = free[idx]
-                in_val = bits_to_int(full_in)
-                out_val = S2[in_val]
-                ob = int_to_bits(out_val, 5)
-                outs.add(tuple(ob[b] for b in out_pos))
-            feasible[in_known] = outs
-        table.append((sbox_idx, in_pos, out_pos, feasible))
-    return table
-
-
-FEASIBLE = _build_feasible_table()
-
-
-def sbox_match(fwd_state, bwd_state):
-    """检查 3 个匹配 S-box 上前向输入 u 与后向输出 v 是否满足 S-box 约束。"""
-    fb = int_to_bits(fwd_state, 64)
-    bb = int_to_bits(bwd_state, 64)
-    for sbox_idx, in_pos, out_pos, feasible in FEASIBLE:
-        in_known = tuple(fb[sbox_idx * 5 + p] for p in in_pos)
-        out_known = tuple(bb[sbox_idx * 5 + p] for p in out_pos)
-        if out_known not in feasible[in_known]:
-            return False
-    return True
 
 
 # ---------------------------------------------------------------------------
 # 单 chunk 攻击（严格按照 SITM 攻击模型）
 # ---------------------------------------------------------------------------
 
-def attack_chunk(chunk_idx, true_chunk_value, num_pairs=5, seed=0):
+def attack_chunk(chunk_idx, true_chunk_value, num_pairs, seed=0):
     """
     对单个 16-bit chunk 执行 Sieve-in-the-Middle 攻击。
     """
@@ -314,6 +272,13 @@ def attack_chunk(chunk_idx, true_chunk_value, num_pairs=5, seed=0):
             _rks_cache[mk] = key_schedule(mk)
         return _rks_cache[mk]
 
+    # 统一验证函数：用完整加解密排除候选密钥
+    def verify_full(mk):
+        for pt, ct in pairs:
+            if encrypt(pt, mk) != ct:
+                return False
+        return True
+
     survivors = []
     t0 = time.time()
 
@@ -321,36 +286,19 @@ def attack_chunk(chunk_idx, true_chunk_value, num_pairs=5, seed=0):
     if fwd_count == 0 and bwd_count == 0:
         for guess in range(1 << 16):
             mk = set_chunk(chunk_idx, guess)
-            rks = get_rks(mk)
-            ok = True
-            for pt, ct in pairs:
-                f = forward_to_match(pt, mk, rks)
-                b = backward_to_match(ct, mk, rks)
-                if not sbox_match(f, b):
-                    ok = False
-                    break
-            if ok:
+            if verify_full(mk):
                 survivors.append(guess)
         elapsed = time.time() - t0
         return survivors, elapsed
 
     # ======== 退化情况 2：仅有后向独有（前向=0，后向>0）========
     # 此时 L_f 只有一个占位条目，即时匹配无任何筛选效果。
-    # 为避免无意义的空 L_f 构建与冗余即时匹配，直接枚举所有 (shared, bwd) 组合。
     if fwd_count == 0 and bwd_count > 0:
         for shared_guess in range(1 << shared_count):
             for bwd_guess in range(1 << bwd_count):
                 chunk_val = compose_chunk(shared_guess, 0, bwd_guess)
                 mk = set_chunk(chunk_idx, chunk_val)
-                rks = get_rks(mk)
-                ok = True
-                for pt, ct in pairs:
-                    f = forward_to_match(pt, mk, rks)
-                    b = backward_to_match(ct, mk, rks)
-                    if not sbox_match(f, b):
-                        ok = False
-                        break
-                if ok:
+                if verify_full(mk):
                     survivors.append(chunk_val)
         elapsed = time.time() - t0
         return survivors, elapsed
@@ -361,80 +309,41 @@ def attack_chunk(chunk_idx, true_chunk_value, num_pairs=5, seed=0):
             for fwd_guess in range(1 << fwd_count):
                 chunk_val = compose_chunk(shared_guess, fwd_guess, 0)
                 mk = set_chunk(chunk_idx, chunk_val)
-                rks = get_rks(mk)
-                ok = True
-                for pt, ct in pairs:
-                    f = forward_to_match(pt, mk, rks)
-                    b = backward_to_match(ct, mk, rks)
-                    if not sbox_match(f, b):
-                        ok = False
-                        break
-                if ok:
+                if verify_full(mk):
                     survivors.append(chunk_val)
         elapsed = time.time() - t0
         return survivors, elapsed
 
     # ======== 标准 SITM 流程（混合型 chunk：前向>0 且 后向>0）========
     for shared_guess in range(1 << shared_count):
-        # ---- 构建 L_f（前向列表，同时缓存第一对的匹配点状态 f_state0）----
-        Lf = {}  # u_tuple → list of (fwd_guess, f_state0)
+        # ---- 构建 L_f（前向列表）----
+        Lf = {}  # u_tuple → list of fwd_guess
         for fwd_guess in range(1 << fwd_count):
             chunk_val = compose_chunk(shared_guess, fwd_guess, true_bwd)
             mk = set_chunk(chunk_idx, chunk_val)
             rks = get_rks(mk)
             f_state0 = forward_to_match(pt0, mk, rks)
             u = extract_u(f_state0)
-            Lf.setdefault(u, []).append((fwd_guess, f_state0))
+            Lf.setdefault(u, []).append(fwd_guess)
 
-        # ---- 构建 L_b（后向列表，同时缓存第一对的匹配点状态 b_state0）----
-        Lb = []  # list of (v_tuple, bwd_guess, b_state0)
+        # ---- 构建 L_b（后向列表）----
+        Lb = []  # list of (v_tuple, bwd_guess)
         for bwd_guess in range(1 << bwd_count):
             chunk_val = compose_chunk(shared_guess, true_fwd, bwd_guess)
             mk = set_chunk(chunk_idx, chunk_val)
             rks = get_rks(mk)
             b_state0 = backward_to_match(ct0, mk, rks)
             v = extract_v(b_state0)
-            Lb.append((v, bwd_guess, b_state0))
+            Lb.append((v, bwd_guess))
 
         # ---- 即时匹配合并（Instant Matching，对应论文图 2）----
         candidate_set = instant_match(Lf, Lb)
 
-        # ---- 多对明密文验证（第一对复用预计算状态）----
+        # ---- 完整加解密验证所有候选 ----
         for fwd_guess, bwd_guess in candidate_set:
             chunk_val = compose_chunk(shared_guess, fwd_guess, bwd_guess)
             mk = set_chunk(chunk_idx, chunk_val)
-            rks = get_rks(mk)
-            ok = True
-
-            # 第一对 (pt0, ct0)：复用 L_f / L_b 中已缓存的 f_state0 / b_state0
-            f_state0 = None
-            for gf, fs in Lf.get(extract_u(forward_to_match(pt0, mk, rks)), []):
-                if gf == fwd_guess:
-                    f_state0 = fs
-                    break
-            if f_state0 is None:
-                f_state0 = forward_to_match(pt0, mk, rks)
-
-            b_state0 = None
-            for _, gb, bs in Lb:
-                if gb == bwd_guess:
-                    b_state0 = bs
-                    break
-            if b_state0 is None:
-                b_state0 = backward_to_match(ct0, mk, rks)
-
-            if not sbox_match(f_state0, b_state0):
-                ok = False
-            else:
-                # 其余对：重新计算 forward / backward
-                for pt, ct in pairs[1:]:
-                    f = forward_to_match(pt, mk, rks)
-                    b = backward_to_match(ct, mk, rks)
-                    if not sbox_match(f, b):
-                        ok = False
-                        break
-
-            if ok:
+            if verify_full(mk):
                 survivors.append(chunk_val)
 
     elapsed = time.time() - t0
@@ -450,7 +359,6 @@ def self_test(num_trials=20, seed=12345):
     往返自测：
       1) decrypt(encrypt(P, K), K) == P
       2) SubCell(forward_to_match(P,K)) == backward_to_match(encrypt(P,K),K)
-      3) sbox_match 在真值密钥下必须通过
     """
     rng = random.Random(seed)
     print("=" * 60)
@@ -465,11 +373,10 @@ def self_test(num_trials=20, seed=12345):
         f_in = forward_to_match(pt, mk)
         b_out = backward_to_match(ct, mk)
         ok_meet = (subcell(f_in) == b_out)
-        ok_match = sbox_match(f_in, b_out)
-        ok_all = ok_rt and ok_meet and ok_match
+        ok_all = ok_rt and ok_meet
         if not ok_all:
             fail += 1
-            print(f"  第 {t + 1:>2} 次：往返={ok_rt} 中点一致={ok_meet} S盒匹配={ok_match}")
+            print(f"  第 {t + 1:>2} 次：往返={ok_rt} 中点一致={ok_meet}")
     print(f"自测通过 {num_trials - fail}/{num_trials} 次")
     print("=" * 60)
     return fail == 0
@@ -489,6 +396,7 @@ def main():
 
     print("ILLcipher-64 Sieve-in-the-Middle 验证 (Nr=10, n=64, k=128)")
     print("匹配点：第 5 轮 SubCell，匹配 S-box {5,6,8}，即时匹配 (Instant Matching)")
+    print("验证方式：完整加解密验证（退化和非退化情况均不使用 sbox_match）")
     print("=" * 90)
     print(f"{'分块':>4} {'类型':>6} {'前向bit':>8} {'后向bit':>8} {'共享bit':>8} "
           f"{'真值':>8} {'候选数':>8} {'命中':>5} {'耗时(s)':>8}  恢复出的候选")
@@ -498,7 +406,7 @@ def main():
     for j in range(8):
         ctype = chunk_type(j)
         fwd_b, bwd_b, sh_b = chunk_bit_breakdown(j)
-        num_pairs = 5
+        num_pairs = 2
         survivors, elapsed = attack_chunk(j, true_vals[j], num_pairs=num_pairs)
         hit = true_vals[j] in survivors
         all_ok = all_ok and hit
