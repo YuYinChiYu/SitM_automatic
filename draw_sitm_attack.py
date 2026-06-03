@@ -152,6 +152,7 @@ def build_forward_states(match_round, fwd_unk_k1):
             rows.append(('perm2', set(unk), 'op', None))
             rows.append((str(r), set(unk), 'round', None))
         else:
+            rows.append(('matrix', set(unk), 'op', None))
             rows.append((f"{r}'", set(unk), 'round', None))
     return rows
 
